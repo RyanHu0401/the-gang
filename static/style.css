@@ -61,3 +61,66 @@ body { font-family: sans-serif; background-color: #2c3e50; color: white; margin:
     border-radius: 4px;
 }
 #name-btn:hover { background: #2c3e50; }
+
+/* Card becomes dim + grey */
+.player-card.disconnected {
+  opacity: 0.45;
+  filter: grayscale(1);
+  border-color: #7f8c8d !important;
+  position: relative;
+}
+
+/* Big diagonal stripe overlay */
+.player-card.disconnected::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(0, 0, 0, 0.35),
+    rgba(0, 0, 0, 0.35) 10px,
+    rgba(0, 0, 0, 0.15) 10px,
+    rgba(0, 0, 0, 0.15) 20px
+  );
+  pointer-events: none;
+}
+
+/* "DISCONNECTED" badge */
+.player-card.disconnected::before {
+  content: "DISCONNECTED";
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 0.65em;
+  font-weight: bold;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.7);
+  border: 1px solid #7f8c8d;
+  color: #ecf0f1;
+  letter-spacing: 0.5px;
+  pointer-events: none;
+}
+
+/* Make everything inside look less interactive */
+.player-card.disconnected button,
+.player-card.disconnected .chip {
+  pointer-events: none;
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+#restart-btn {
+    padding: 6px 12px;
+    background: #e74c3c;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85em;
+}
+
+#restart-btn:hover {
+    background: #c0392b;
+}

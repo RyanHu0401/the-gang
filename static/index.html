@@ -18,7 +18,15 @@
                 &nbsp;|&nbsp;
                 <span style="color: #e74c3c">🚨 Alarms: <span id="alarm-count">0</span>/3</span>
             </div>
-            <button id="start-btn" onclick="startGame()">Start Heist (Requires 3+)</button>
+            <div style="display:flex; flex-direction:column; gap:6px; align-items:flex-end;">
+                <button id="start-btn" onclick="startGame()">
+                    Start Heist (Requires 3+)
+                </button>
+
+                <button id="restart-btn" onclick="restartGame()">
+                    Restart Game
+                </button>
+            </div>
         </div>
 
         <div id="opponents-row" class="row">
