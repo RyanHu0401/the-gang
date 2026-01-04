@@ -2,10 +2,11 @@ import socketio
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
-from game_logic import Game, Player
+
+from game_logic import Game  # <-- use the refactored Game (with join_or_reconnect etc.)
 
 # 1. Setup Networking
-sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static", html=True), name="static")
 
@@ -18,55 +19,129 @@ socket_app = socketio.ASGIApp(sio, app)
 # 2. Game Instance
 game = Game()
 
-# 3. Socket Events
+
+# -----------------------
+# Helpers
+# -----------------------
+def _default_name_for_new_player() -> str:
+    # "Thief 1", "Thief 2", ... based on current number of players
+    return f"Thief {len(game.players) + 1}"
+
+
+async def broadcast_state():
+    """
+    Broadcast per-player state to each *connected* socket.
+    Uses connection->player mapping so refreshed clients still receive updates.
+    """
+    # Copy keys to avoid mutation during iteration if someone disconnects mid-loop
+    for connection_sid in list(game.connections.keys()):
+        state = game.get_state_by_connection(connection_sid)
+        await sio.emit("game_update", state, room=connection_sid)
+
+
+# -----------------------
+# Socket Events
+# -----------------------
 @sio.event
 async def connect(sid, environ):
     print(f"Client connected: {sid}")
-    # Assign a default name like "Thief 1", "Thief 2"
-    game.players[sid] = Player(sid, f"Thief {len(game.players) + 1}")
-    await broadcast_state()
+    # Do NOT create a player here anymore.
+    # Wait for the client to send join payload containing persistent player_id.
+    await sio.emit("request_join", {}, room=sid)
+
 
 @sio.event
 async def disconnect(sid):
-    if sid in game.players:
-        del game.players[sid]
+    print(f"Client disconnected: {sid}")
+    game.handle_disconnect(sid)
     await broadcast_state()
+
+
+@sio.event
+async def join_game(sid, data):
+    """
+    Client should emit:
+      join_game: { player_id: "<stable id>", name: "<display name>" }
+
+    player_id should be generated/stored in localStorage on client.
+    """
+    player_id = (data or {}).get("player_id", "").strip()
+    name = (data or {}).get("name", "").strip() or _default_name_for_new_player()
+
+    ok, msg = game.join_or_reconnect(connection_sid=sid, player_id=player_id, name=name)
+    if not ok:
+        await sio.emit("error", msg, room=sid)
+        return
+
+    await broadcast_state()
+
 
 @sio.event
 async def change_name(sid, name):
-    success, msg = game.change_player_name(sid, name)
+    pid = game.player_id_from_connection(sid)
+    if not pid:
+        await sio.emit("error", "Not joined yet.", room=sid)
+        return
+
+    success, msg = game.change_player_name(pid, name)
     if success:
         await broadcast_state()
     else:
-        # Send error only to the person trying to change the name
-        await sio.emit('error', msg, room=sid)
+        await sio.emit("error", msg, room=sid)
+
 
 @sio.event
 async def start_game(sid):
+    # Optionally: restrict who can start; for now keep your original behavior
     if game.start_game():
         await broadcast_state()
 
+
 @sio.event
 async def take_chip(sid, data):
-    if game.handle_take_chip(sid, data['chip_value'], data['source']):
+    """
+    data: { chip_value: int, source: "center" or <victim_player_id> }
+    IMPORTANT:
+      - source must be "center" or a *player_id*, not a connection sid.
+    """
+    if not data or "chip_value" not in data or "source" not in data:
+        await sio.emit("error", "Invalid take_chip payload.", room=sid)
+        return
+
+    chip_value = data["chip_value"]
+    source = data["source"]
+
+    if game.handle_take_chip_by_connection(sid, chip_value, source):
         await broadcast_state()
+    else:
+        await sio.emit("error", "Invalid chip action.", room=sid)
+
 
 @sio.event
 async def return_chip(sid):
-    if game.handle_return_chip(sid):
+    if game.handle_return_chip_by_connection(sid):
         await broadcast_state()
+    else:
+        await sio.emit("error", "Cannot return chip.", room=sid)
+
 
 @sio.event
 async def toggle_settle(sid):
-    if game.toggle_settle(sid):
+    if game.toggle_settle_by_connection(sid):
         await broadcast_state()
+    else:
+        await sio.emit("error", "Cannot settle (need a chip first).", room=sid)
 
-async def broadcast_state():
-    for pid in game.players:
-        state = game.get_state(pid)
-        await sio.emit('game_update', state, room=pid)
+@sio.event
+async def restart_game(sid):
+    # Optional: you can restrict to host/admin later.
+    if game.restart_full_game():
+        await broadcast_state()
+    else:
+        await sio.emit("error", "Need at least 3 players to restart.", room=sid)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     import uvicorn
     print("Starting server on http://localhost:3000/static/index.html")
-    uvicorn.run(socket_app, host='0.0.0.0', port=3000)
+    uvicorn.run(socket_app, host="0.0.0.0", port=3000)
