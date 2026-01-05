@@ -274,29 +274,50 @@ class Game:
         active_players = [p for p in self.players.values() if p.chip is not None]
         active_players.sort(key=lambda p: p.chip) # type: ignore
 
-        previous_score = 999999
-        mistake_made = False
-        result_log: List[str] = []
-
+        evaluations: List[dict] = []
         for p in active_players:
             score = self.evaluator.evaluate(self.community_ints, p.hand_ints)
             rank_class = self.evaluator.get_rank_class(score)
             class_str = self.evaluator.class_to_string(rank_class)
+            evaluations.append({
+                'player': p,
+                'score': score,
+                'class_str': class_str
+            })
 
-            if score > previous_score:
-                mistake_made = True
-                result_log.append(f"❌ {p.name} ({p.chip}★): {class_str} (Weaker!)")
-            else:
-                result_log.append(f"✅ {p.name} ({p.chip}★): {class_str}")
+        # Count total inversions (any earlier player has a better hand than a later player).
+        inversion_count = 0
+        for i in range(len(evaluations)):
+            for j in range(i + 1, len(evaluations)):
+                if evaluations[i]['score'] < evaluations[j]['score']:
+                    inversion_count += 1
 
-            previous_score = score
+        result_log: List[str] = []
+        for idx, ev in enumerate(evaluations):
+            player = ev['player']
+            score = ev['score']
+            class_str = ev['class_str']
 
-        if mistake_made:
+            # This player is part of an inversion if any prior player is stronger.
+            is_inversion = any(prev['score'] < score for prev in evaluations[:idx])
+            prefix = "❌" if is_inversion else "✅"
+            suffix = " (Out of order!)" if is_inversion else ""
+            result_log.append(f"{prefix} {player.name} ({player.chip}★): {class_str}{suffix}")
+
+        if inversion_count > 0:
             self.alarms += 1
-            self.heist_result = f"ALARM TRIPPED! 🚨 ({self.alarms}/3)<br>" + "<br>".join(result_log)
+            self.heist_result = (
+                f"ALARM TRIPPED! 🚨 ({self.alarms}/3)<br>"
+                f"Inversion count: {inversion_count}<br>"
+                + "<br>".join(result_log)
+            )
         else:
             self.vaults += 1
-            self.heist_result = f"HEIST SUCCESS! 💰 ({self.vaults}/3)<br>" + "<br>".join(result_log)
+            self.heist_result = (
+                f"HEIST SUCCESS! 💰 ({self.vaults}/3)<br>"
+                f"Inversion count: {inversion_count}<br>"
+                + "<br>".join(result_log)
+            )
 
         if self.alarms >= 3:
             self.heist_result += "<br><br><b>GAME OVER! THE POLICE ARRIVED! 🚓</b>"
