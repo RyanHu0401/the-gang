@@ -58,6 +58,12 @@ function changeName() {
   }
 }
 
+function removePlayer(targetPlayerId) {
+  const ok = confirm("Remove this disconnected player from the game?");
+  if (!ok) return;
+  socket.emit("remove_player", { target_player_id: targetPlayerId });
+}
+
 /**
  * IMPORTANT:
  * source must be "center" OR an opponent's player_id (NOT socket sid).
@@ -192,12 +198,18 @@ function renderGame(state) {
       handHtml += "</div>";
     }
 
+    const isDisc = (p.is_connected === false);
     const statusLabel =
-      p.is_connected === false ? "⛔ DISCONNECTED" : p.is_settled ? "✔ SETTLED" : "...";
+      isDisc ? "⛔ DISCONNECTED" : p.is_settled ? "✔ SETTLED" : "...";
+
+    const kickHtml = isDisc
+      ? `<button class="kick-btn" onclick="removePlayer('${p.player_id}')">Remove</button>`
+      : "";
 
     pDiv.innerHTML = `
       <div class="p-name">${p.name}</div>
       <div class="p-status">${statusLabel}</div>
+      ${kickHtml}
       ${handHtml}
       <div class="p-chip">${chipHtml}</div>
       ${historyHtml}
