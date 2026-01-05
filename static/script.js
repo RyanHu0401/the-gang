@@ -32,6 +32,33 @@ socket.on("error", (msg) => {
   alert(msg);
 });
 
+function formatDuration(totalSeconds) {
+  totalSeconds = Math.max(0, Math.floor(totalSeconds));
+
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function updateDisconnectedTimers() {
+  const els = document.querySelectorAll(".disc-time[data-disconnected-at]");
+  const nowSec = Date.now() / 1000;
+
+  els.forEach((el) => {
+    const at = parseFloat(el.getAttribute("data-disconnected-at") || "");
+    if (!isFinite(at) || at <= 0) return;
+    const diff = nowSec - at;
+    el.textContent = ` (${formatDuration(diff)})`;
+  });
+}
+
+// Update timers once per second
+setInterval(updateDisconnectedTimers, 1000);
+
 // --- Actions ---
 function startGame() {
   socket.emit("start_game");
@@ -56,6 +83,12 @@ function changeName() {
     socket.emit("change_name", newName);
     nameInput.value = "";
   }
+}
+
+function removePlayer(targetPlayerId) {
+  const ok = confirm("Remove this disconnected player from the game?");
+  if (!ok) return;
+  socket.emit("remove_player", { target_player_id: targetPlayerId });
 }
 
 /**
@@ -192,12 +225,26 @@ function renderGame(state) {
       handHtml += "</div>";
     }
 
-    const statusLabel =
-      p.is_connected === false ? "⛔ DISCONNECTED" : p.is_settled ? "✔ SETTLED" : "...";
+    const isDisc = (p.is_connected === false);
+
+    let statusLabel;
+    if (isDisc) {
+      const nowSec = Date.now() / 1000;
+      const at = (p.disconnected_at || 0);
+      const initial = at ? ` (${formatDuration(nowSec - at)})` : "";
+      statusLabel = `⛔ DISCONNECTED<span class="disc-time" data-disconnected-at="${at}">${initial}</span>`;
+    } else {
+      statusLabel = p.is_settled ? "✔ SETTLED" : "...";
+    }
+
+    const kickHtml = isDisc
+      ? `<button class="kick-btn" onclick="removePlayer('${p.player_id}')">Remove</button>`
+      : "";
 
     pDiv.innerHTML = `
       <div class="p-name">${p.name}</div>
       <div class="p-status">${statusLabel}</div>
+      ${kickHtml}
       ${handHtml}
       <div class="p-chip">${chipHtml}</div>
       ${historyHtml}
@@ -244,6 +291,7 @@ function renderGame(state) {
     settleBtn.classList.remove("active");
     chipBankEl.classList.remove("disabled");
   }
+  updateDisconnectedTimers();
 }
 
 function createCardDiv(card) {

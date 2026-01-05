@@ -130,6 +130,39 @@ class Game:
             p.is_connected = False
             p.disconnected_at = time.time()
         return True
+    
+    def remove_disconnected_player(self, target_player_id: str) -> Tuple[bool, str]:
+        """
+        Remove a player ONLY if they are currently disconnected.
+        Anyone connected is allowed to request this (permission enforced server-side).
+        """
+        target_player_id = (target_player_id or "").strip()
+        if not target_player_id:
+            return False, "Missing target_player_id."
+
+        p = self.players.get(target_player_id)
+        if not p:
+            return False, "Player not found."
+
+        if p.is_connected:
+            return False, "Cannot remove a connected player."
+
+        # Clean up any lingering connection mappings (should be none if disconnected,
+        # but handle edge cases)
+        sids_to_remove = [sid for sid, pid in self.connections.items() if pid == target_player_id]
+        for sid in sids_to_remove:
+            self.connections.pop(sid, None)
+
+        # If they currently hold a chip, return it to the bank
+        if p.chip is not None:
+            self.chips_available.append(p.chip)
+            self.chips_available.sort()
+
+        # Finally remove from game
+        self.players.pop(target_player_id, None)
+
+        return True, "Removed disconnected player."
+
 
     def player_id_from_connection(self, connection_sid: str) -> Optional[str]:
         return self.connections.get(connection_sid)
@@ -239,7 +272,7 @@ class Game:
     def evaluate_showdown(self) -> None:
         # "Active" = players who ended with a chip assigned (your original rule)
         active_players = [p for p in self.players.values() if p.chip is not None]
-        active_players.sort(key=lambda p: p.chip)
+        active_players.sort(key=lambda p: p.chip) # type: ignore
 
         previous_score = 999999
         mistake_made = False

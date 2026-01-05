@@ -56,6 +56,30 @@ async def disconnect(sid):
     game.handle_disconnect(sid)
     await broadcast_state()
 
+@sio.event
+async def remove_player(sid, data):
+    """
+    data: { target_player_id: "<player_id>" }
+
+    Rule:
+      - requester must be a joined/connected player
+      - target must exist AND be disconnected
+      - anyone connected can do it
+    """
+    requester_pid = game.player_id_from_connection(sid)
+    if not requester_pid:
+        await sio.emit("error", "Not joined yet.", room=sid)
+        return
+
+    target_pid = (data or {}).get("target_player_id", "").strip()
+    ok, msg = game.remove_disconnected_player(target_pid)
+    if not ok:
+        await sio.emit("error", msg, room=sid)
+        return
+
+    await broadcast_state()
+
+
 
 @sio.event
 async def join_game(sid, data):
