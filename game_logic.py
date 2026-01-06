@@ -73,6 +73,7 @@ class Game:
         self.heist_result = ""
         self.vaults = 0
         self.alarms = 0
+        self.chat_messages: List[dict] = []
 
     # -------------------------
     # Connection / identity API
@@ -214,6 +215,20 @@ class Game:
             return True, "Name changed."
 
         return False, "Player not found."
+
+    def add_chat_message(self, name: str, text: str, is_observer: bool) -> None:
+        text = (text or "").strip()
+        name = (name or "").strip() or "Anonymous"
+        if not text:
+            return
+        self.chat_messages.append({
+            "name": name,
+            "text": text,
+            "timestamp": time.time(),
+            "is_observer": is_observer
+        })
+        if len(self.chat_messages) > 100:
+            self.chat_messages = self.chat_messages[-100:]
 
     # -------------------------
     # Game flow
@@ -482,7 +497,8 @@ class Game:
             'me': me_obj.to_dict(include_hand=True) if me_obj else None,
             'result_message': self.heist_result,
             'vaults': self.vaults,
-            'alarms': self.alarms
+            'alarms': self.alarms,
+            'chat_messages': self.chat_messages
         }
 
     # -------------------------

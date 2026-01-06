@@ -133,6 +133,28 @@ async def change_name(sid, name):
 
 
 @sio.event
+async def chat_message(sid, data):
+    pid = game.player_id_from_connection(sid)
+    if not pid:
+        await sio.emit("error", "Not joined yet.", room=sid)
+        return
+
+    text = (data or {}).get("text", "").strip()
+    if not text:
+        return
+
+    if len(text) > 300:
+        text = text[:300]
+
+    player = game.players.get(pid)
+    if not player:
+        return
+
+    game.add_chat_message(player.name, text, player.is_observer)
+    await broadcast_state()
+
+
+@sio.event
 async def start_game(sid):
     # Optionally: restrict who can start; for now keep your original behavior
     if game.start_game():

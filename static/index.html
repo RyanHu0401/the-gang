@@ -32,12 +32,26 @@
         <div id="opponents-row" class="row">
             </div>
 
-        <div id="observer-area">
-            <div id="observer-header">
-                <h4>Observer Seats</h4>
-                <span id="observer-status"></span>
+        <div id="side-panel">
+            <div id="observer-area">
+                <div id="observer-header">
+                    <h4>Observer Seats</h4>
+                    <span id="observer-status"></span>
+                </div>
+                <div id="observer-list"></div>
             </div>
-            <div id="observer-list"></div>
+            <div id="chat-area">
+                <div id="chat-header">
+                    <h4>Table Chat</h4>
+                </div>
+                <div id="chat-messages"></div>
+                <form id="chat-form">
+                    <div id="chat-input-wrap">
+                        <input id="chat-input" type="text" placeholder="Type a message..." autocomplete="off">
+                        <button id="chat-send" type="submit" aria-label="Send message">⏎</button>
+                    </div>
+                </form>
+            </div>
         </div>
 
         <div id="table-area">

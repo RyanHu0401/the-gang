@@ -12,6 +12,10 @@ let isObserver = localStorage.getItem("observer_mode") === "true";
 const socket = io();
 const $ = (id) => document.getElementById(id);
 
+const chatForm = $("chat-form");
+const chatInput = $("chat-input");
+const chatMessagesEl = $("chat-messages");
+
 // --- Socket Listeners ---
 socket.on("connect", () => {
   console.log("Connected to server");
@@ -31,6 +35,16 @@ socket.on("game_update", renderGame);
 
 socket.on("error", alert);
 
+if (chatForm) {
+  chatForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const text = (chatInput.value || "").trim();
+    if (!text) return;
+    socket.emit("chat_message", { text });
+    chatInput.value = "";
+  });
+}
+
 function formatDuration(totalSeconds) {
   totalSeconds = Math.max(0, Math.floor(totalSeconds));
 
@@ -41,6 +55,12 @@ function formatDuration(totalSeconds) {
   if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+function formatChatTime(tsSeconds) {
+  const date = new Date((tsSeconds || 0) * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function updateDisconnectedTimers() {
@@ -155,7 +175,7 @@ function renderGame(state) {
   const settleBtn = $("settle-btn");
   const returnBtn = $("return-btn");
   const myNameEl = $("my-name");
-  const { phase, chip_color, community_cards, chips_available, players, result_message, vaults, alarms } = state;
+  const { phase, chip_color, community_cards, chips_available, players, result_message, vaults, alarms, chat_messages } = state;
 
   // 1. Status & Score (default header text)
   const statusText =
@@ -303,6 +323,35 @@ function renderGame(state) {
 
   observerStatusEl.textContent = isObserverView ? "You are observing" : "";
   observerBtn.textContent = isObserverView ? "Join Game" : "Observe";
+
+  // Chat
+  if (chatMessagesEl) {
+    chatMessagesEl.innerHTML = "";
+    (chat_messages || []).forEach((msg) => {
+      const line = document.createElement("div");
+      line.className = "chat-line";
+      const time = formatChatTime(msg.timestamp);
+      const roleTag = msg.is_observer ? " (Observer)" : "";
+
+      const nameEl = document.createElement("span");
+      nameEl.className = "chat-name";
+      nameEl.textContent = `${msg.name}${roleTag}`;
+
+      const timeEl = document.createElement("span");
+      timeEl.className = "chat-time";
+      timeEl.textContent = time;
+
+      const textEl = document.createElement("div");
+      textEl.className = "chat-text";
+      textEl.textContent = msg.text;
+
+      line.appendChild(nameEl);
+      line.appendChild(timeEl);
+      line.appendChild(textEl);
+      chatMessagesEl.appendChild(line);
+    });
+    chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+  }
 
   // 5. My State
   // My Cards
