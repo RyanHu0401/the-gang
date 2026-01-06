@@ -6,6 +6,7 @@ if (!playerId) {
 }
 
 let myName = localStorage.getItem("player_name") || "";
+let isObserver = localStorage.getItem("observer_mode") === "true";
 
 // --- Socket ---
 const socket = io();
@@ -21,7 +22,8 @@ socket.on("request_join", () => {
   // Identify or re-identify with stable player_id (reconnect after refresh)
   socket.emit("join_game", {
     player_id: playerId,
-    name: myName || ""
+    name: myName || "",
+    is_observer: isObserver
   });
 });
 
@@ -82,6 +84,26 @@ function changeName() {
   }
 }
 
+function setObserverMode(nextIsObserver) {
+  isObserver = nextIsObserver;
+  localStorage.setItem("observer_mode", String(nextIsObserver));
+  socket.emit("join_game", {
+    player_id: playerId,
+    name: myName || "",
+    is_observer: nextIsObserver
+  });
+}
+
+function toggleObserver() {
+  if (!isObserver) {
+    const ok = confirm("Move to an observer seat? You will leave the game.");
+    if (!ok) return;
+    setObserverMode(true);
+  } else {
+    setObserverMode(false);
+  }
+}
+
 function removePlayer(targetPlayerId) {
   const ok = confirm("Remove this disconnected player from the game?");
   if (!ok) return;
@@ -110,12 +132,23 @@ function renderGame(state) {
   const me = state?.me;
   if (!me) return;
 
+  const isObserverView = state.viewer_role === "observer";
+  if (isObserverView !== isObserver) {
+    isObserver = isObserverView;
+    localStorage.setItem("observer_mode", String(isObserverView));
+  }
+
+  document.body.classList.toggle("observer-mode", isObserverView);
+
   const phaseEl = $("phase-display");
   const vaultEl = $("vault-count");
   const alarmEl = $("alarm-count");
   const commCardsEl = $("community-cards");
   const chipBankEl = $("chip-bank");
   const opponentsEl = $("opponents-row");
+  const observerListEl = $("observer-list");
+  const observerStatusEl = $("observer-status");
+  const observerBtn = $("observer-btn");
   const myCardsEl = $("my-cards");
   const myHistoryEl = $("my-history");
   const myChipSlot = $("my-chip-slot");
@@ -182,10 +215,11 @@ function renderGame(state) {
   // 4. Opponents
   opponentsEl.innerHTML = "";
 
-  const myPlayerId = me.player_id;
+  const myPlayerId = isObserverView ? null : me.player_id;
 
   players.forEach((p) => {
-    if (p.player_id === myPlayerId) return;
+    if (p.is_observer) return;
+    if (myPlayerId && p.player_id === myPlayerId) return;
 
     const pDiv = document.createElement("div");
 
@@ -251,16 +285,35 @@ function renderGame(state) {
     opponentsEl.appendChild(pDiv);
   });
 
+  // Observers
+  observerListEl.innerHTML = "";
+  const observerItems = (players || []).filter((p) => p.is_observer);
+  if (observerItems.length === 0) {
+    observerListEl.innerHTML = '<span class="observer-empty">No observers</span>';
+  } else {
+    observerItems.forEach((o) => {
+      const pill = document.createElement("div");
+      const disconnectedClass = o.is_connected === false ? "disconnected" : "";
+      pill.className = `observer-pill ${disconnectedClass}`;
+      const youTag = (isObserverView && o.player_id === me.player_id) ? " (You)" : "";
+      pill.textContent = `${o.name}${youTag}`;
+      observerListEl.appendChild(pill);
+    });
+  }
+
+  observerStatusEl.textContent = isObserverView ? "You are observing" : "";
+  observerBtn.textContent = isObserverView ? "Join Game" : "Observe";
+
   // 5. My State
   // My Cards
   myCardsEl.innerHTML = "";
-  if (me.hand && me.hand.length > 0) {
+  if (!isObserverView && me.hand && me.hand.length > 0) {
     me.hand.forEach((c) => myCardsEl.appendChild(createCardDiv(c)));
   }
 
   // My History
   myHistoryEl.innerHTML = "";
-  if (me.chip_history && me.chip_history.length > 0) {
+  if (!isObserverView && me.chip_history && me.chip_history.length > 0) {
     me.chip_history.forEach((h) => {
       const span = document.createElement("span");
       span.className = `mini-chip chip-${h.color.toLowerCase()}`;
@@ -270,10 +323,14 @@ function renderGame(state) {
   }
 
   // My Chip (current)
-  if (me.chip) {
+  if (!isObserverView && me.chip) {
     myChipSlot.innerHTML = `<div class="chip chip-${chip_color.toLowerCase()}">★ ${me.chip}</div>`;
     settleBtn.disabled = false;
     returnBtn.disabled = me.is_settled;
+  } else if (isObserverView) {
+    myChipSlot.innerHTML = '<span class="placeholder">Observer</span>';
+    settleBtn.disabled = true;
+    returnBtn.disabled = true;
   } else {
     myChipSlot.innerHTML = '<span class="placeholder">Pick a chip</span>';
     settleBtn.disabled = true;
@@ -281,7 +338,11 @@ function renderGame(state) {
   }
 
   // Disable/enable chip bank picking based on settle state
-  if (me.is_settled) {
+  if (isObserverView) {
+    settleBtn.innerText = "I'm Settled";
+    settleBtn.classList.remove("active");
+    chipBankEl.classList.add("disabled");
+  } else if (me.is_settled) {
     settleBtn.innerText = "Cancel Settle";
     settleBtn.classList.add("active");
     chipBankEl.classList.add("disabled");

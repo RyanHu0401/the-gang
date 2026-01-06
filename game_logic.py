@@ -25,6 +25,7 @@ class Player:
     def __init__(self, player_id: str, name: str):
         self.player_id = player_id
         self.name = name
+        self.is_observer: bool = False
 
         self.hand_ints: List[int] = []
         self.hand_str: List[dict] = []
@@ -41,6 +42,7 @@ class Player:
         return {
             'player_id': self.player_id,
             'name': self.name,
+            'is_observer': self.is_observer,
             'hand': self.hand_str if include_hand else [],
             'chip': self.chip,
             'chip_history': self.chip_history,
@@ -75,7 +77,7 @@ class Game:
     # -------------------------
     # Connection / identity API
     # -------------------------
-    def join_or_reconnect(self, connection_sid: str, player_id: str, name: str) -> Tuple[bool, str]:
+    def join_or_reconnect(self, connection_sid: str, player_id: str, name: str, is_observer: bool = False) -> Tuple[bool, str]:
         """
         Call this when a client connects (or refreshes) and sends player_id + name.
 
@@ -100,13 +102,30 @@ class Game:
         # Create or reconnect
         if player_id not in self.players:
             self.players[player_id] = Player(player_id=player_id, name=name)
+            if self.game_started and not is_observer:
+                self.players[player_id].is_observer = True
+                return True, "Joined as observer until the next hand."
+            self.players[player_id].is_observer = is_observer
             return True, "Joined."
         else:
             p = self.players[player_id]
             # Allow updating name on reconnect (still enforces uniqueness above)
             p.name = name
+            force_observer = self.game_started and not is_observer and len(p.hand_ints) < 2
+            p.is_observer = True if force_observer else is_observer
             p.is_connected = True
             p.disconnected_at = None
+            if p.is_observer:
+                if p.chip is not None:
+                    self.chips_available.append(p.chip)
+                    self.chips_available.sort()
+                p.chip = None
+                p.is_settled = False
+                p.hand_ints = []
+                p.hand_str = []
+                p.chip_history = []
+            if force_observer:
+                return True, "Reconnected as observer until the next hand."
             return True, "Reconnected."
 
     def handle_disconnect(self, connection_sid: str) -> bool:
@@ -165,6 +184,7 @@ class Game:
     def player_id_from_connection(self, connection_sid: str) -> Optional[str]:
         return self.connections.get(connection_sid)
 
+
     # -------------------------
     # Utility
     # -------------------------
@@ -199,7 +219,8 @@ class Game:
     # Game flow
     # -------------------------
     def start_game(self) -> bool:
-        if len(self.players) < 3:
+        active_players = [p for p in self.players.values() if not p.is_observer]
+        if len(active_players) < 3:
             return False
 
         # Reset global win/lose if finished previously
@@ -216,10 +237,17 @@ class Game:
         self.heist_result = ""
 
         for player in self.players.values():
+            if player.is_observer:
+                player.hand_ints = []
+                player.hand_str = []
+                player.chip_history = []
+                player.chip = None
+                player.is_settled = False
+                continue
+
             cards = self.deck.draw(2)
             player.hand_ints = cards
             player.hand_str = [self._format_card(cards[0]), self._format_card(cards[1])]
-
             player.chip_history = []
 
         self._setup_phase_chips()
@@ -236,9 +264,13 @@ class Game:
 
 
     def _setup_phase_chips(self) -> None:
-        num_players = len(self.players)
+        num_players = sum(1 for p in self.players.values() if not p.is_observer)
         self.chips_available = list(range(1, num_players + 1))
         for p in self.players.values():
+            if p.is_observer:
+                p.chip = None
+                p.is_settled = False
+                continue
             p.chip = None
             p.is_settled = False
 
@@ -255,6 +287,8 @@ class Game:
 
         current_color = CHIP_COLORS[PHASES[self.phase_index]]
         for p in self.players.values():
+            if p.is_observer:
+                continue
             if p.chip is not None:
                 p.chip_history.append({'color': current_color, 'value': p.chip})
 
@@ -271,7 +305,7 @@ class Game:
 
     def evaluate_showdown(self) -> None:
         # "Active" = players who ended with a chip assigned (your original rule)
-        active_players = [p for p in self.players.values() if p.chip is not None]
+        active_players = [p for p in self.players.values() if (not p.is_observer and p.chip is not None)]
         # Highest chip number represents the strongest claimed rank (last chip taken is "largest")
         active_players.sort(key=lambda p: p.chip, reverse=True)  # type: ignore
 
@@ -379,7 +413,7 @@ class Game:
     # -------------------------
     def handle_take_chip(self, actor_player_id: str, chip_value: int, source_player_id_or_center: str) -> bool:
         actor = self.players.get(actor_player_id)
-        if not actor or actor.is_settled:
+        if not actor or actor.is_settled or actor.is_observer or len(actor.hand_ints) < 2:
             return False
 
         if actor.chip is not None:
@@ -404,7 +438,7 @@ class Game:
 
     def handle_return_chip(self, player_id: str) -> bool:
         player = self.players.get(player_id)
-        if not player or player.is_settled or player.chip is None:
+        if not player or player.is_settled or player.chip is None or player.is_observer:
             return False
         self.chips_available.append(player.chip)
         self.chips_available.sort()
@@ -413,13 +447,13 @@ class Game:
 
     def toggle_settle(self, player_id: str) -> bool:
         player = self.players.get(player_id)
-        if not player or player.chip is None:
+        if not player or player.chip is None or player.is_observer:
             return False
 
         player.is_settled = not player.is_settled
 
         # IMPORTANT: only require connected players to settle to advance
-        connected_players = [p for p in self.players.values() if p.is_connected]
+        connected_players = [p for p in self.players.values() if (p.is_connected and not p.is_observer)]
         if connected_players and all(p.is_settled and p.chip is not None for p in connected_players):
             self.next_phase()
 
@@ -443,6 +477,7 @@ class Game:
                 p.to_dict(include_hand=(p.player_id == for_player_id or show_all))
                 for p in self.players.values()
             ],
+            'viewer_role': 'observer' if (me_obj and me_obj.is_observer) else 'player' if me_obj else 'unknown',
             'me': me_obj.to_dict(include_hand=True) if me_obj else None,
             'result_message': self.heist_result,
             'vaults': self.vaults,
