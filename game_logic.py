@@ -467,6 +467,7 @@ class Game:
         show_all = (safe_phase == 'RESULT')
 
         me_obj = self.players.get(for_player_id) if for_player_id else None
+        viewer_is_observer = bool(me_obj and me_obj.is_observer)
 
         return {
             'phase': safe_phase if self.game_started else "LOBBY",
@@ -474,7 +475,7 @@ class Game:
             'community_cards': self.community_str,
             'chips_available': sorted(self.chips_available),
             'players': [
-                p.to_dict(include_hand=(p.player_id == for_player_id or show_all))
+                p.to_dict(include_hand=(viewer_is_observer or p.player_id == for_player_id or show_all))
                 for p in self.players.values()
             ],
             'viewer_role': 'observer' if (me_obj and me_obj.is_observer) else 'player' if me_obj else 'unknown',
