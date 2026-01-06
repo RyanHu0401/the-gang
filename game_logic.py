@@ -91,10 +91,8 @@ class Game:
         if not name:
             return False, "Name cannot be empty."
 
-        # Prevent duplicate names among *different* player_ids (case-insensitive)
-        for pid, p in self.players.items():
-            if pid != player_id and p.name.lower() == name.lower():
-                return False, "Name already taken."
+        if self._is_duplicate_name(name, exclude_player_id=player_id):
+            return False, "Name already taken."
 
         # Map this connection to this player_id
         self.connections[connection_sid] = player_id
@@ -130,7 +128,7 @@ class Game:
             p.is_connected = False
             p.disconnected_at = time.time()
         return True
-    
+
     def remove_disconnected_player(self, target_player_id: str) -> Tuple[bool, str]:
         """
         Remove a player ONLY if they are currently disconnected.
@@ -149,9 +147,9 @@ class Game:
 
         # Clean up any lingering connection mappings (should be none if disconnected,
         # but handle edge cases)
-        sids_to_remove = [sid for sid, pid in self.connections.items() if pid == target_player_id]
-        for sid in sids_to_remove:
-            self.connections.pop(sid, None)
+        self.connections = {
+            sid: pid for sid, pid in self.connections.items() if pid != target_player_id
+        }
 
         # If they currently hold a chip, return it to the bank
         if p.chip is not None:
@@ -176,15 +174,20 @@ class Game:
         suit = SUIT_MAP.get(c_str[1], c_str[1])
         return {'rank': rank, 'suit': suit, 'str': rank + suit}
 
+    def _is_duplicate_name(self, candidate: str, exclude_player_id: Optional[str] = None) -> bool:
+        candidate = candidate.lower()
+        return any(
+            pid != exclude_player_id and p.name.lower() == candidate
+            for pid, p in self.players.items()
+        )
+
     def change_player_name(self, player_id: str, new_name: str) -> Tuple[bool, str]:
         new_name = (new_name or "").strip()
         if not new_name:
             return False, "Name cannot be empty."
 
-        # Check for duplicate names (case-insensitive)
-        for pid, p in self.players.items():
-            if pid != player_id and p.name.lower() == new_name.lower():
-                return False, "Name already taken."
+        if self._is_duplicate_name(new_name, exclude_player_id=player_id):
+            return False, "Name already taken."
 
         if player_id in self.players:
             self.players[player_id].name = new_name
@@ -217,13 +220,11 @@ class Game:
             player.hand_ints = cards
             player.hand_str = [self._format_card(cards[0]), self._format_card(cards[1])]
 
-            player.chip = None
             player.chip_history = []
-            player.is_settled = False
 
         self._setup_phase_chips()
         return True
-    
+
     def restart_full_game(self) -> bool:
         """
         Full reset: resets vaults/alarms AND starts a new heist immediately.
@@ -246,8 +247,7 @@ class Game:
             return
         new_cards = self.deck.draw(count)
         self.community_ints.extend(new_cards)
-        for c in new_cards:
-            self.community_str.append(self._format_card(c))
+        self.community_str.extend(self._format_card(c) for c in new_cards)
 
     def next_phase(self) -> None:
         if self.phase_index >= len(PHASES) - 1:
@@ -272,7 +272,8 @@ class Game:
     def evaluate_showdown(self) -> None:
         # "Active" = players who ended with a chip assigned (your original rule)
         active_players = [p for p in self.players.values() if p.chip is not None]
-        active_players.sort(key=lambda p: p.chip) # type: ignore
+        # Highest chip number represents the strongest claimed rank (last chip taken is "largest")
+        active_players.sort(key=lambda p: p.chip, reverse=True)  # type: ignore
 
         evaluations: List[dict] = []
         for p in active_players:
@@ -285,37 +286,86 @@ class Game:
                 'class_str': class_str
             })
 
-        # Count total inversions (any earlier player has a better hand than a later player).
-        inversion_count = 0
-        for i in range(len(evaluations)):
-            for j in range(i + 1, len(evaluations)):
-                if evaluations[i]['score'] < evaluations[j]['score']:
-                    inversion_count += 1
+        # True ordering: lower score = stronger hand. Equal scores share the same rank window.
+        true_sorted = sorted(evaluations, key=lambda ev: ev['score'])
+        true_rank_map: Dict[str, Tuple[int, int]] = {}
+        current_rank = 1
+        idx = 0
+        while idx < len(true_sorted):
+            group_score = true_sorted[idx]['score']
+            group: List[dict] = []
+            while idx < len(true_sorted) and true_sorted[idx]['score'] == group_score:
+                group.append(true_sorted[idx])
+                idx += 1
+            group_size = len(group)
+            group_start = current_rank
+            group_end = current_rank + group_size - 1
+            for ev in group:
+                true_rank_map[ev['player'].player_id] = (group_start, group_end)
+            current_rank = group_end + 1
 
-        result_log: List[str] = []
-        for idx, ev in enumerate(evaluations):
+        total_error = 0
+        max_error = 0
+
+        buckets: Dict[int, List[dict]] = {0: [], 1: [], 2: [], 3: []}  # 3 = 3 or more (way off)
+        for guess_idx, ev in enumerate(evaluations):
             player = ev['player']
-            score = ev['score']
             class_str = ev['class_str']
 
-            # This player is part of an inversion if any prior player is stronger.
-            is_inversion = any(prev['score'] < score for prev in evaluations[:idx])
-            prefix = "❌" if is_inversion else "✅"
-            suffix = " (Out of order!)" if is_inversion else ""
-            result_log.append(f"{prefix} {player.name} ({player.chip}★): {class_str}{suffix}")
+            guess_rank = guess_idx + 1  # chip order
+            true_start, true_end = true_rank_map[player.player_id]
+            if true_start <= guess_rank <= true_end:
+                error = 0
+            else:
+                error = min(abs(guess_rank - true_start), abs(guess_rank - true_end))
+            total_error += error
+            max_error = max(max_error, error)
 
-        if inversion_count > 0:
-            self.alarms += 1
-            self.heist_result = (
-                f"ALARM TRIPPED! 🚨 ({self.alarms}/3)<br>"
-                f"Inversion count: {inversion_count}<br>"
-                + "<br>".join(result_log)
+            bucket_key = error if error < 3 else 3
+            buckets[bucket_key].append({
+                'player': player,
+                'guess_rank': guess_rank,
+                'true_rank': f"{true_start}-{true_end}" if true_start != true_end else str(true_start),
+                'class_str': class_str
+            })
+
+        # Compact summary: group players by accuracy bucket for shorter logs.
+        bucket_labels = {
+            0: "✅ Perfect",
+            1: "🟨 Close",
+            2: "🟧 Off",
+            3: "🟥 Way off"
+        }
+
+        result_log: List[str] = []
+
+        if buckets[0]:
+            names = ", ".join(
+                f"{b['player'].name} (#{b['true_rank']} • {b['class_str']})"
+                for b in buckets[0]
             )
-        else:
+            result_log.append(f"{bucket_labels[0]}: {names}")
+
+        for key in [1, 2, 3]:
+            if buckets[key]:
+                for b in buckets[key]:
+                    result_log.append(
+                        f"{bucket_labels[key]} — {b['player'].name} guessed #{b['guess_rank']}, "
+                        f"true #{b['true_rank']} ({b['class_str']})"
+                    )
+
+        if max_error == 0:
             self.vaults += 1
             self.heist_result = (
                 f"HEIST SUCCESS! 💰 ({self.vaults}/3)<br>"
-                f"Inversion count: {inversion_count}<br>"
+                f"Everyone nailed their spot. Total error: {total_error}<br>"
+                + "<br>".join(result_log)
+            )
+        else:
+            self.alarms += 1
+            self.heist_result = (
+                f"ALARM TRIPPED! 🚨 ({self.alarms}/3)<br>"
+                f"Missed spots, but we learn together. Total error: {total_error}<br>"
                 + "<br>".join(result_log)
             )
 
@@ -332,27 +382,25 @@ class Game:
         if not actor or actor.is_settled:
             return False
 
-        # If actor already had a chip, return it to pool
         if actor.chip is not None:
             self.chips_available.append(actor.chip)
             actor.chip = None
 
         if source_player_id_or_center == "center":
-            if chip_value in self.chips_available:
-                self.chips_available.remove(chip_value)
-                actor.chip = chip_value
-            else:
+            if chip_value not in self.chips_available:
                 return False
-        else:
-            victim = self.players.get(source_player_id_or_center)
-            if victim and victim.chip == chip_value:
-                victim.chip = None
-                victim.is_settled = False
-                actor.chip = chip_value
-            else:
-                return False
+            self.chips_available.remove(chip_value)
+            actor.chip = chip_value
+            return True
 
-        return True
+        victim = self.players.get(source_player_id_or_center)
+        if victim and victim.chip == chip_value:
+            victim.chip = None
+            victim.is_settled = False
+            actor.chip = chip_value
+            return True
+
+        return False
 
     def handle_return_chip(self, player_id: str) -> bool:
         player = self.players.get(player_id)
@@ -372,12 +420,7 @@ class Game:
 
         # IMPORTANT: only require connected players to settle to advance
         connected_players = [p for p in self.players.values() if p.is_connected]
-        if not connected_players:
-            return True
-
-        settled_with_chips = sum(1 for p in connected_players if p.is_settled and p.chip is not None)
-
-        if settled_with_chips == len(connected_players):
+        if connected_players and all(p.is_settled and p.chip is not None for p in connected_players):
             self.next_phase()
 
         return True

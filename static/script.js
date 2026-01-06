@@ -9,6 +9,7 @@ let myName = localStorage.getItem("player_name") || "";
 
 // --- Socket ---
 const socket = io();
+const $ = (id) => document.getElementById(id);
 
 // --- Socket Listeners ---
 socket.on("connect", () => {
@@ -24,13 +25,9 @@ socket.on("request_join", () => {
   });
 });
 
-socket.on("game_update", (state) => {
-  renderGame(state);
-});
+socket.on("game_update", renderGame);
 
-socket.on("error", (msg) => {
-  alert(msg);
-});
+socket.on("error", alert);
 
 function formatDuration(totalSeconds) {
   totalSeconds = Math.max(0, Math.floor(totalSeconds));
@@ -75,7 +72,7 @@ function restartGame() {
 }
 
 function changeName() {
-  const nameInput = document.getElementById("name-input");
+  const nameInput = $("name-input");
   const newName = (nameInput.value || "").trim();
   if (newName) {
     myName = newName;
@@ -110,40 +107,42 @@ function toggleSettle() {
 // --- Rendering ---
 function renderGame(state) {
   // If we haven't joined yet, state.me can be null
-  if (!state || !state.me) return;
+  const me = state?.me;
+  if (!me) return;
 
-  const phaseEl = document.getElementById("phase-display");
-  const vaultEl = document.getElementById("vault-count");
-  const alarmEl = document.getElementById("alarm-count");
-  const commCardsEl = document.getElementById("community-cards");
-  const chipBankEl = document.getElementById("chip-bank");
-  const opponentsEl = document.getElementById("opponents-row");
-  const myCardsEl = document.getElementById("my-cards");
-  const myHistoryEl = document.getElementById("my-history");
-  const myChipSlot = document.getElementById("my-chip-slot");
-  const settleBtn = document.getElementById("settle-btn");
-  const returnBtn = document.getElementById("return-btn");
-  const myNameEl = document.getElementById("my-name");
+  const phaseEl = $("phase-display");
+  const vaultEl = $("vault-count");
+  const alarmEl = $("alarm-count");
+  const commCardsEl = $("community-cards");
+  const chipBankEl = $("chip-bank");
+  const opponentsEl = $("opponents-row");
+  const myCardsEl = $("my-cards");
+  const myHistoryEl = $("my-history");
+  const myChipSlot = $("my-chip-slot");
+  const settleBtn = $("settle-btn");
+  const returnBtn = $("return-btn");
+  const myNameEl = $("my-name");
+  const { phase, chip_color, community_cards, chips_available, players, result_message, vaults, alarms } = state;
 
   // 1. Status & Score (default header text)
   const statusText =
-    state.phase === "LOBBY"
+    phase === "LOBBY"
       ? "Waiting for Players..."
-      : `${state.phase} - ${state.chip_color} Chips`;
+      : `${phase} - ${chip_color} Chips`;
 
   // If not RESULT, keep it plain text; if RESULT, we will override with HTML below
-  if (state.phase !== "RESULT") {
+  if (phase !== "RESULT") {
     phaseEl.innerText = statusText;
   }
 
-  vaultEl.innerText = state.vaults;
-  alarmEl.innerText = state.alarms;
+  vaultEl.innerText = vaults;
+  alarmEl.innerText = alarms;
 
-  myNameEl.innerText = state.me.name;
+  myNameEl.innerText = me.name;
 
   // RESULT view (in the phase area)
-  if (state.phase === "RESULT") {
-    const msg = state.result_message || "";
+  if (phase === "RESULT") {
+    const msg = result_message || "";
     const successColor =
       msg.includes("SUCCESS") || msg.includes("WIN") ? "#2ecc71" : "#e74c3c";
 
@@ -166,15 +165,15 @@ function renderGame(state) {
 
   // 2. Community Cards
   commCardsEl.innerHTML = "";
-  state.community_cards.forEach((card) => {
+  community_cards.forEach((card) => {
     commCardsEl.appendChild(createCardDiv(card));
   });
 
   // 3. Chip Bank
   chipBankEl.innerHTML = "";
-  state.chips_available.forEach((val) => {
+  chips_available.forEach((val) => {
     const btn = document.createElement("button");
-    btn.className = `chip chip-${state.chip_color.toLowerCase()}`;
+    btn.className = `chip chip-${chip_color.toLowerCase()}`;
     btn.innerText = `★ ${val}`;
     btn.onclick = () => takeChip(val, "center");
     chipBankEl.appendChild(btn);
@@ -183,9 +182,9 @@ function renderGame(state) {
   // 4. Opponents
   opponentsEl.innerHTML = "";
 
-  const myPlayerId = state.me.player_id;
+  const myPlayerId = me.player_id;
 
-  state.players.forEach((p) => {
+  players.forEach((p) => {
     if (p.player_id === myPlayerId) return;
 
     const pDiv = document.createElement("div");
@@ -198,7 +197,7 @@ function renderGame(state) {
     let chipHtml = '<span class="no-chip">No Chip</span>';
     if (p.chip) {
       chipHtml = `
-        <button class="chip chip-${state.chip_color.toLowerCase()}"
+        <button class="chip chip-${chip_color.toLowerCase()}"
                 onclick="takeChip(${p.chip}, '${p.player_id}')">
           ★ ${p.chip}
         </button>
@@ -255,14 +254,14 @@ function renderGame(state) {
   // 5. My State
   // My Cards
   myCardsEl.innerHTML = "";
-  if (state.me.hand && state.me.hand.length > 0) {
-    state.me.hand.forEach((c) => myCardsEl.appendChild(createCardDiv(c)));
+  if (me.hand && me.hand.length > 0) {
+    me.hand.forEach((c) => myCardsEl.appendChild(createCardDiv(c)));
   }
 
   // My History
   myHistoryEl.innerHTML = "";
-  if (state.me.chip_history && state.me.chip_history.length > 0) {
-    state.me.chip_history.forEach((h) => {
+  if (me.chip_history && me.chip_history.length > 0) {
+    me.chip_history.forEach((h) => {
       const span = document.createElement("span");
       span.className = `mini-chip chip-${h.color.toLowerCase()}`;
       span.innerText = h.value;
@@ -271,10 +270,10 @@ function renderGame(state) {
   }
 
   // My Chip (current)
-  if (state.me.chip) {
-    myChipSlot.innerHTML = `<div class="chip chip-${state.chip_color.toLowerCase()}">★ ${state.me.chip}</div>`;
+  if (me.chip) {
+    myChipSlot.innerHTML = `<div class="chip chip-${chip_color.toLowerCase()}">★ ${me.chip}</div>`;
     settleBtn.disabled = false;
-    returnBtn.disabled = state.me.is_settled;
+    returnBtn.disabled = me.is_settled;
   } else {
     myChipSlot.innerHTML = '<span class="placeholder">Pick a chip</span>';
     settleBtn.disabled = true;
@@ -282,7 +281,7 @@ function renderGame(state) {
   }
 
   // Disable/enable chip bank picking based on settle state
-  if (state.me.is_settled) {
+  if (me.is_settled) {
     settleBtn.innerText = "Cancel Settle";
     settleBtn.classList.add("active");
     chipBankEl.classList.add("disabled");
