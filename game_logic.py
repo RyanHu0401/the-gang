@@ -74,6 +74,7 @@ class Game:
         self.vaults = 0
         self.alarms = 0
         self.chat_messages: List[dict] = []
+        self.result_details: Dict[str, List[dict]] = {}
 
     # -------------------------
     # Connection / identity API
@@ -250,6 +251,7 @@ class Game:
         self.community_ints = []
         self.community_str = []
         self.heist_result = ""
+        self.result_details = {}
 
         for player in self.players.values():
             if player.is_observer:
@@ -305,7 +307,11 @@ class Game:
             if p.is_observer:
                 continue
             if p.chip is not None:
-                p.chip_history.append({'color': current_color, 'value': p.chip})
+                p.chip_history.append({
+                    'color': current_color,
+                    'value': p.chip,
+                    'phase': PHASES[self.phase_index]
+                })
 
         self.phase_index += 1
         phase = PHASES[self.phase_index]
@@ -335,23 +341,7 @@ class Game:
                 'class_str': class_str
             })
 
-        # True ordering: lower score = stronger hand. Equal scores share the same rank window.
-        true_sorted = sorted(evaluations, key=lambda ev: ev['score'])
-        true_rank_map: Dict[str, Tuple[int, int]] = {}
-        current_rank = 1
-        idx = 0
-        while idx < len(true_sorted):
-            group_score = true_sorted[idx]['score']
-            group: List[dict] = []
-            while idx < len(true_sorted) and true_sorted[idx]['score'] == group_score:
-                group.append(true_sorted[idx])
-                idx += 1
-            group_size = len(group)
-            group_start = current_rank
-            group_end = current_rank + group_size - 1
-            for ev in group:
-                true_rank_map[ev['player'].player_id] = (group_start, group_end)
-            current_rank = group_end + 1
+        true_rank_map = self._compute_true_rank_map(evaluations)
 
         total_error = 0
         max_error = 0
@@ -422,6 +412,101 @@ class Game:
             self.heist_result += "<br><br><b>GAME OVER! THE POLICE ARRIVED! 🚓</b>"
         elif self.vaults >= 3:
             self.heist_result += "<br><br><b>YOU WIN! RETIRE RICH! 💎</b>"
+
+        self.result_details = self._compute_phase_details()
+
+    def _compute_true_rank_map(self, evaluations: List[dict]) -> Dict[str, Tuple[int, int]]:
+        # True ordering: lower score = stronger hand. Equal scores share the same rank window.
+        true_sorted = sorted(evaluations, key=lambda ev: ev['score'])
+        true_rank_map: Dict[str, Tuple[int, int]] = {}
+        current_rank = 1
+        idx = 0
+        while idx < len(true_sorted):
+            group_score = true_sorted[idx]['score']
+            group: List[dict] = []
+            while idx < len(true_sorted) and true_sorted[idx]['score'] == group_score:
+                group.append(true_sorted[idx])
+                idx += 1
+            group_size = len(group)
+            group_start = current_rank
+            group_end = current_rank + group_size - 1
+            for ev in group:
+                true_rank_map[ev['player'].player_id] = (group_start, group_end)
+            current_rank = group_end + 1
+        return true_rank_map
+
+    def _chip_for_phase(self, player: "Player", phase_name: str) -> Optional[int]:
+        for entry in reversed(player.chip_history):
+            if entry.get("phase") == phase_name:
+                return entry.get("value")
+        target_color = CHIP_COLORS.get(phase_name)
+        for entry in reversed(player.chip_history):
+            if entry.get("color") == target_color:
+                return entry.get("value")
+        return None
+
+    def _compute_phase_details(self) -> Dict[str, List[dict]]:
+        phase_card_counts = {"FLOP": 3, "TURN": 4, "RIVER": 5}
+        details: Dict[str, List[dict]] = {}
+
+        for phase_name, card_count in phase_card_counts.items():
+            if len(self.community_ints) < card_count:
+                details[phase_name] = []
+                continue
+
+            community_subset = self.community_ints[:card_count]
+            evaluations: List[dict] = []
+            guess_entries: List[dict] = []
+
+            for p in self.players.values():
+                if p.is_observer or len(p.hand_ints) < 2:
+                    continue
+                guess_chip = self._chip_for_phase(p, phase_name)
+                if guess_chip is None:
+                    continue
+                score = self.evaluator.evaluate(community_subset, p.hand_ints)
+                rank_class = self.evaluator.get_rank_class(score)
+                class_str = self.evaluator.class_to_string(rank_class)
+                evaluations.append({
+                    'player': p,
+                    'score': score,
+                    'class_str': class_str
+                })
+                guess_entries.append({
+                    'player': p,
+                    'chip': guess_chip
+                })
+
+            if not evaluations:
+                details[phase_name] = []
+                continue
+
+            true_rank_map = self._compute_true_rank_map(evaluations)
+            guess_entries.sort(key=lambda g: g['chip'], reverse=True)
+            guess_rank_map = {
+                g['player'].player_id: idx + 1 for idx, g in enumerate(guess_entries)
+            }
+            eval_map = {ev['player'].player_id: ev for ev in evaluations}
+
+            phase_rows: List[dict] = []
+            for g in guess_entries:
+                pid = g['player'].player_id
+                true_start, true_end = true_rank_map[pid]
+                guess_rank = guess_rank_map[pid]
+                is_correct = true_start <= guess_rank <= true_end
+                true_rank = f"{true_start}-{true_end}" if true_start != true_end else str(true_start)
+                phase_rows.append({
+                    'player_id': pid,
+                    'name': g['player'].name,
+                    'guess_rank': guess_rank,
+                    'true_rank': true_rank,
+                    'hand_class': eval_map[pid]['class_str'],
+                    'is_correct': is_correct
+                })
+
+            details[phase_name] = phase_rows
+
+        return details
 
     # -------------------------
     # Chip actions (use player_id)
@@ -496,6 +581,7 @@ class Game:
             'viewer_role': 'observer' if (me_obj and me_obj.is_observer) else 'player' if me_obj else 'unknown',
             'me': me_obj.to_dict(include_hand=True) if me_obj else None,
             'result_message': self.heist_result,
+            'result_details': self.result_details if show_all else None,
             'vaults': self.vaults,
             'alarms': self.alarms,
             'chat_messages': self.chat_messages

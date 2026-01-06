@@ -7,6 +7,8 @@ if (!playerId) {
 
 let myName = localStorage.getItem("player_name") || "";
 let isObserver = localStorage.getItem("observer_mode") === "true";
+let showResultDetails = false;
+let lastState = null;
 
 // --- Socket ---
 const socket = io();
@@ -146,8 +148,45 @@ function toggleSettle() {
   socket.emit("toggle_settle");
 }
 
+function toggleResultDetails() {
+  showResultDetails = !showResultDetails;
+  if (lastState) renderGame(lastState);
+}
+
+function buildResultDetails(details) {
+  if (!details) return "";
+  const phases = ["FLOP", "TURN", "RIVER"];
+  let html = '<div class="result-details">';
+  phases.forEach((phase) => {
+    const rows = details[phase] || [];
+    html += `<div class="result-phase">`;
+    html += `<div class="result-phase-title">${phase}</div>`;
+    if (rows.length === 0) {
+      html += `<div class="result-empty">No rankings available.</div>`;
+    } else {
+      rows.forEach((row) => {
+        const statusClass = row.is_correct ? "ok" : "off";
+        const statusLabel = row.is_correct ? "OK" : "OFF";
+        html += `
+          <div class="result-row">
+            <span class="result-name">${row.name}</span>
+            <span class="result-guess">Guess #${row.guess_rank}</span>
+            <span class="result-true">True #${row.true_rank}</span>
+            <span class="result-hand">${row.hand_class}</span>
+            <span class="result-status ${statusClass}">${statusLabel}</span>
+          </div>
+        `;
+      });
+    }
+    html += `</div>`;
+  });
+  html += "</div>";
+  return html;
+}
+
 // --- Rendering ---
 function renderGame(state) {
+  lastState = state;
   // If we haven't joined yet, state.me can be null
   const me = state?.me;
   if (!me) return;
@@ -175,7 +214,18 @@ function renderGame(state) {
   const settleBtn = $("settle-btn");
   const returnBtn = $("return-btn");
   const myNameEl = $("my-name");
-  const { phase, chip_color, community_cards, chips_available, players, result_message, vaults, alarms, chat_messages } = state;
+  const {
+    phase,
+    chip_color,
+    community_cards,
+    chips_available,
+    players,
+    result_message,
+    result_details,
+    vaults,
+    alarms,
+    chat_messages
+  } = state;
 
   // 1. Status & Score (default header text)
   const statusText =
@@ -198,6 +248,10 @@ function renderGame(state) {
     const msg = result_message || "";
     const successColor =
       msg.includes("SUCCESS") || msg.includes("WIN") ? "#2ecc71" : "#e74c3c";
+    const detailsBtnLabel = showResultDetails
+      ? "Hide Detailed Rankings"
+      : "Show Detailed Rankings";
+    const detailsHtml = showResultDetails ? buildResultDetails(result_details) : "";
 
     phaseEl.innerHTML = `
       <div style="color: ${successColor}">
@@ -212,7 +266,12 @@ function renderGame(state) {
         <button onclick="restartGame()" style="background:#e74c3c; border:none; color:white; padding:10px 14px; border-radius:4px; cursor:pointer;">
           Restart Game (Reset 0/0)
         </button>
+
+        <button onclick="toggleResultDetails()">
+          ${detailsBtnLabel}
+        </button>
       </div>
+      ${detailsHtml}
     `;
   }
 
