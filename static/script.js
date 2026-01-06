@@ -389,23 +389,17 @@ function renderGame(state) {
     (chat_messages || []).forEach((msg) => {
       const line = document.createElement("div");
       line.className = "chat-line";
-      const time = formatChatTime(msg.timestamp);
       const roleTag = msg.is_observer ? " (Observer)" : "";
 
       const nameEl = document.createElement("span");
       nameEl.className = "chat-name";
       nameEl.textContent = `${msg.name}${roleTag}`;
 
-      const timeEl = document.createElement("span");
-      timeEl.className = "chat-time";
-      timeEl.textContent = time;
-
-      const textEl = document.createElement("div");
+      const textEl = document.createElement("span");
       textEl.className = "chat-text";
       textEl.textContent = msg.text;
 
       line.appendChild(nameEl);
-      line.appendChild(timeEl);
       line.appendChild(textEl);
       chatMessagesEl.appendChild(line);
     });
