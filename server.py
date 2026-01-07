@@ -25,7 +25,8 @@ game = Game()
 # -----------------------
 def _default_name_for_new_player() -> str:
     # "Thief 1", "Thief 2", ... based on current number of players
-    return f"Thief {len(game.players) + 1}"
+    active_players = [p for p in game.players.values() if not p.is_observer]
+    return f"Thief {len(active_players) + 1}"
 
 
 async def broadcast_state():
@@ -85,14 +86,31 @@ async def remove_player(sid, data):
 async def join_game(sid, data):
     """
     Client should emit:
-      join_game: { player_id: "<stable id>", name: "<display name>" }
+      join_game: { player_id: "<stable id>", name: "<display name>", is_observer: bool }
 
     player_id should be generated/stored in localStorage on client.
     """
     player_id = (data or {}).get("player_id", "").strip()
-    name = (data or {}).get("name", "").strip() or _default_name_for_new_player()
+    raw_observer = (data or {}).get("is_observer", False)
+    if isinstance(raw_observer, str):
+        is_observer = raw_observer.strip().lower() in ("1", "true", "yes", "y")
+    else:
+        is_observer = bool(raw_observer)
 
-    ok, msg = game.join_or_reconnect(connection_sid=sid, player_id=player_id, name=name)
+    name = (data or {}).get("name", "").strip()
+    if not name:
+        if is_observer:
+            observer_count = sum(1 for p in game.players.values() if p.is_observer)
+            name = f"Observer {observer_count + 1}"
+        else:
+            name = _default_name_for_new_player()
+
+    ok, msg = game.join_or_reconnect(
+        connection_sid=sid,
+        player_id=player_id,
+        name=name,
+        is_observer=is_observer
+    )
     if not ok:
         await sio.emit("error", msg, room=sid)
         return
@@ -115,10 +133,34 @@ async def change_name(sid, name):
 
 
 @sio.event
+async def chat_message(sid, data):
+    pid = game.player_id_from_connection(sid)
+    if not pid:
+        await sio.emit("error", "Not joined yet.", room=sid)
+        return
+
+    text = (data or {}).get("text", "").strip()
+    if not text:
+        return
+
+    if len(text) > 300:
+        text = text[:300]
+
+    player = game.players.get(pid)
+    if not player:
+        return
+
+    game.add_chat_message(player.name, text, player.is_observer)
+    await broadcast_state()
+
+
+@sio.event
 async def start_game(sid):
     # Optionally: restrict who can start; for now keep your original behavior
     if game.start_game():
         await broadcast_state()
+    else:
+        await sio.emit("game_action_error", "Need at least 3 players to start a heist.", room=sid)
 
 
 @sio.event
@@ -162,7 +204,25 @@ async def restart_game(sid):
     if game.restart_full_game():
         await broadcast_state()
     else:
-        await sio.emit("error", "Need at least 3 players to restart.", room=sid)
+        await sio.emit("game_action_error", "Need at least 3 players to restart.", room=sid)
+
+
+@sio.event
+async def throw_tomato(sid, data):
+    requester_pid = game.player_id_from_connection(sid)
+    if not requester_pid:
+        await sio.emit("error", "Not joined yet.", room=sid)
+        return
+
+    target_pid = (data or {}).get("target_player_id", "").strip()
+    ok, msg = game.throw_tomato(requester_pid, target_pid)
+    if not ok:
+        await sio.emit("error", msg, room=sid)
+        return
+
+    await sio.emit("tomato_event", game.tomato_event)
+    await broadcast_state()
+
 
 
 if __name__ == "__main__":

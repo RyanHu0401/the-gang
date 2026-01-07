@@ -19,9 +19,7 @@
                 <span style="color: #e74c3c">🚨 Alarms: <span id="alarm-count">0</span>/3</span>
             </div>
             <div style="display:flex; flex-direction:column; gap:6px; align-items:flex-end;">
-                <button id="start-btn" onclick="startGame()">
-                    Start Heist (Requires 3+)
-                </button>
+                <button id="start-btn" onclick="startGame()">Start Heist</button>
 
                 <button id="restart-btn" onclick="restartGame()">
                     Restart Game
@@ -31,6 +29,28 @@
 
         <div id="opponents-row" class="row">
             </div>
+
+        <div id="side-panel">
+            <div id="observer-area">
+                <div id="observer-header">
+                    <h4>Observer Seats</h4>
+                    <span id="observer-status"></span>
+                </div>
+                <div id="observer-list"></div>
+            </div>
+            <div id="chat-area">
+                <div id="chat-header">
+                    <h4>Table Chat</h4>
+                </div>
+                <div id="chat-messages"></div>
+                <form id="chat-form">
+                    <div id="chat-input-wrap">
+                        <input id="chat-input" type="text" placeholder="Type a message..." autocomplete="off">
+                        <button id="chat-send" type="submit" aria-label="Send message">⏎</button>
+                    </div>
+                </form>
+            </div>
+        </div>
 
         <div id="table-area">
             <div id="community-cards" class="card-container"></div>
@@ -44,6 +64,7 @@
                 <div id="name-controls">
                     <input type="text" id="name-input" placeholder="Enter Name">
                     <button id="name-btn" onclick="changeName()">Update</button>
+                    <button id="observer-btn" onclick="toggleObserver()">Observe</button>
                 </div>
                 <h3><span id="my-name">Me</span></h3>
 

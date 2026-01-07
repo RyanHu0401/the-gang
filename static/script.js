@@ -6,9 +6,29 @@ if (!playerId) {
 }
 
 let myName = localStorage.getItem("player_name") || "";
+let isObserver = localStorage.getItem("observer_mode") === "true";
+let showResultDetails = false;
+let lastState = null;
+const TOMATO_LIFETIME_MS = 3000;
+const TOMATO_FLIGHT_MS = 650;
+const GAME_ACTION_TOAST_MS = 3000;
+let tomatoClearTimeout = null;
+let lastTomatoEventId = null;
+let pendingTomatoEvent = null;
+let activeTomatoTargetId = null;
+let activeTomatoExpiresAt = 0;
+let activeTomatoShowAt = 0;
+let tomatoImpactTimeout = null;
+let openTomatoMenu = null;
+let gameActionToastTimeout = null;
 
 // --- Socket ---
 const socket = io();
+const $ = (id) => document.getElementById(id);
+
+const chatForm = $("chat-form");
+const chatInput = $("chat-input");
+const chatMessagesEl = $("chat-messages");
 
 // --- Socket Listeners ---
 socket.on("connect", () => {
@@ -20,17 +40,40 @@ socket.on("request_join", () => {
   // Identify or re-identify with stable player_id (reconnect after refresh)
   socket.emit("join_game", {
     player_id: playerId,
-    name: myName || ""
+    name: myName || "",
+    is_observer: isObserver
   });
 });
 
-socket.on("game_update", (state) => {
-  renderGame(state);
+socket.on("game_update", renderGame);
+
+socket.on("error", alert);
+socket.on("game_action_error", (message) => {
+  showGameActionToast(message);
+});
+socket.on("tomato_event", (event) => {
+  if (!lastState) {
+    pendingTomatoEvent = event;
+    return;
+  }
+  const me = lastState?.me;
+  const playerAreaEl = $("player-area");
+  if (playerAreaEl && me) {
+    playerAreaEl.setAttribute("data-player-id", me.player_id);
+    ensureTomatoSplat(playerAreaEl);
+  }
+  applyTomatoEffect(event, me, playerAreaEl);
 });
 
-socket.on("error", (msg) => {
-  alert(msg);
-});
+if (chatForm) {
+  chatForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const text = (chatInput.value || "").trim();
+    if (!text) return;
+    socket.emit("chat_message", { text });
+    chatInput.value = "";
+  });
+}
 
 function formatDuration(totalSeconds) {
   totalSeconds = Math.max(0, Math.floor(totalSeconds));
@@ -42,6 +85,12 @@ function formatDuration(totalSeconds) {
   if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+function formatChatTime(tsSeconds) {
+  const date = new Date((tsSeconds || 0) * 1000);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function updateDisconnectedTimers() {
@@ -75,13 +124,33 @@ function restartGame() {
 }
 
 function changeName() {
-  const nameInput = document.getElementById("name-input");
+  const nameInput = $("name-input");
   const newName = (nameInput.value || "").trim();
   if (newName) {
     myName = newName;
     localStorage.setItem("player_name", newName);
     socket.emit("change_name", newName);
     nameInput.value = "";
+  }
+}
+
+function setObserverMode(nextIsObserver) {
+  isObserver = nextIsObserver;
+  localStorage.setItem("observer_mode", String(nextIsObserver));
+  socket.emit("join_game", {
+    player_id: playerId,
+    name: myName || "",
+    is_observer: nextIsObserver
+  });
+}
+
+function toggleObserver() {
+  if (!isObserver) {
+    const ok = confirm("Move to an observer seat? You will leave the game.");
+    if (!ok) return;
+    setObserverMode(true);
+  } else {
+    setObserverMode(false);
   }
 }
 
@@ -107,45 +176,164 @@ function toggleSettle() {
   socket.emit("toggle_settle");
 }
 
+function toggleTomatoMenu(targetPlayerId, targetName, anchorEl) {
+  if (!targetPlayerId || !anchorEl) return;
+  const existing = document.querySelector(".tomato-menu");
+  if (existing) {
+    if (existing._outsideClickHandler) {
+      document.removeEventListener("click", existing._outsideClickHandler);
+    }
+    existing.remove();
+    openTomatoMenu = null;
+  }
+
+  const menu = document.createElement("div");
+  menu.className = "tomato-menu";
+  menu.innerHTML = `
+    <button class="tomato-menu-btn" type="button" aria-label="Throw tomato">
+      🍅
+    </button>
+  `;
+  let closeOnOutsideClick = null;
+  const removeMenu = () => {
+    if (closeOnOutsideClick) {
+      document.removeEventListener("click", closeOnOutsideClick);
+      closeOnOutsideClick = null;
+    }
+    if (menu.isConnected) {
+      menu.remove();
+    }
+    openTomatoMenu = null;
+  };
+  const btn = menu.querySelector(".tomato-menu-btn");
+  btn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    socket.emit("throw_tomato", { target_player_id: targetPlayerId });
+    removeMenu();
+  });
+
+  anchorEl.appendChild(menu);
+  openTomatoMenu = menu;
+
+  closeOnOutsideClick = (event) => {
+    if (!menu.isConnected) return;
+    if (menu.contains(event.target)) return;
+    if (anchorEl.contains(event.target)) return;
+    removeMenu();
+  };
+  menu._outsideClickHandler = closeOnOutsideClick;
+  document.addEventListener("click", closeOnOutsideClick);
+}
+
+function toggleResultDetails() {
+  showResultDetails = !showResultDetails;
+  if (lastState) renderGame(lastState);
+}
+
+function buildResultDetails(details) {
+  if (!details) return "";
+  const phases = ["FLOP", "TURN", "RIVER"];
+  let html = '<div class="result-details">';
+  phases.forEach((phase) => {
+    const rows = details[phase] || [];
+    html += `<div class="result-phase">`;
+    html += `<div class="result-phase-title">${phase}</div>`;
+    if (rows.length === 0) {
+      html += `<div class="result-empty">No rankings available.</div>`;
+    } else {
+      rows.forEach((row) => {
+        const statusClass = row.is_correct ? "ok" : "off";
+        const statusLabel = row.is_correct ? "OK" : "OFF";
+        html += `
+          <div class="result-row">
+            <span class="result-name">${row.name}</span>
+            <span class="result-guess">Guess #${row.guess_rank}</span>
+            <span class="result-true">True #${row.true_rank}</span>
+            <span class="result-hand">${row.hand_class}</span>
+            <span class="result-status ${statusClass}">${statusLabel}</span>
+          </div>
+        `;
+      });
+    }
+    html += `</div>`;
+  });
+  html += "</div>";
+  return html;
+}
+
 // --- Rendering ---
 function renderGame(state) {
+  lastState = state;
   // If we haven't joined yet, state.me can be null
-  if (!state || !state.me) return;
+  const me = state?.me;
+  if (!me) return;
 
-  const phaseEl = document.getElementById("phase-display");
-  const vaultEl = document.getElementById("vault-count");
-  const alarmEl = document.getElementById("alarm-count");
-  const commCardsEl = document.getElementById("community-cards");
-  const chipBankEl = document.getElementById("chip-bank");
-  const opponentsEl = document.getElementById("opponents-row");
-  const myCardsEl = document.getElementById("my-cards");
-  const myHistoryEl = document.getElementById("my-history");
-  const myChipSlot = document.getElementById("my-chip-slot");
-  const settleBtn = document.getElementById("settle-btn");
-  const returnBtn = document.getElementById("return-btn");
-  const myNameEl = document.getElementById("my-name");
+  if (openTomatoMenu && !openTomatoMenu.isConnected) {
+    openTomatoMenu = null;
+  }
+
+  const isObserverView = state.viewer_role === "observer";
+  if (isObserverView !== isObserver) {
+    isObserver = isObserverView;
+    localStorage.setItem("observer_mode", String(isObserverView));
+  }
+
+  document.body.classList.toggle("observer-mode", isObserverView);
+
+  const phaseEl = $("phase-display");
+  const vaultEl = $("vault-count");
+  const alarmEl = $("alarm-count");
+  const commCardsEl = $("community-cards");
+  const chipBankEl = $("chip-bank");
+  const opponentsEl = $("opponents-row");
+  const observerListEl = $("observer-list");
+  const observerStatusEl = $("observer-status");
+  const observerBtn = $("observer-btn");
+  const myCardsEl = $("my-cards");
+  const myHistoryEl = $("my-history");
+  const myChipSlot = $("my-chip-slot");
+  const settleBtn = $("settle-btn");
+  const returnBtn = $("return-btn");
+  const myNameEl = $("my-name");
+  const playerAreaEl = $("player-area");
+  const {
+    phase,
+    chip_color,
+    community_cards,
+    chips_available,
+    players,
+    result_message,
+    result_details,
+    vaults,
+    alarms,
+    chat_messages
+  } = state;
 
   // 1. Status & Score (default header text)
   const statusText =
-    state.phase === "LOBBY"
+    phase === "LOBBY"
       ? "Waiting for Players..."
-      : `${state.phase} - ${state.chip_color} Chips`;
+      : `${phase} - ${chip_color} Chips`;
 
   // If not RESULT, keep it plain text; if RESULT, we will override with HTML below
-  if (state.phase !== "RESULT") {
+  if (phase !== "RESULT") {
     phaseEl.innerText = statusText;
   }
 
-  vaultEl.innerText = state.vaults;
-  alarmEl.innerText = state.alarms;
+  vaultEl.innerText = vaults;
+  alarmEl.innerText = alarms;
 
-  myNameEl.innerText = state.me.name;
+  myNameEl.innerText = me.name;
 
   // RESULT view (in the phase area)
-  if (state.phase === "RESULT") {
-    const msg = state.result_message || "";
+  if (phase === "RESULT") {
+    const msg = result_message || "";
     const successColor =
       msg.includes("SUCCESS") || msg.includes("WIN") ? "#2ecc71" : "#e74c3c";
+    const detailsBtnLabel = showResultDetails
+      ? "Hide Detailed Rankings"
+      : "Show Detailed Rankings";
+    const detailsHtml = showResultDetails ? buildResultDetails(result_details) : "";
 
     phaseEl.innerHTML = `
       <div style="color: ${successColor}">
@@ -160,21 +348,26 @@ function renderGame(state) {
         <button onclick="restartGame()" style="background:#e74c3c; border:none; color:white; padding:10px 14px; border-radius:4px; cursor:pointer;">
           Restart Game (Reset 0/0)
         </button>
+
+        <button onclick="toggleResultDetails()">
+          ${detailsBtnLabel}
+        </button>
       </div>
+      ${detailsHtml}
     `;
   }
 
   // 2. Community Cards
   commCardsEl.innerHTML = "";
-  state.community_cards.forEach((card) => {
+  community_cards.forEach((card) => {
     commCardsEl.appendChild(createCardDiv(card));
   });
 
   // 3. Chip Bank
   chipBankEl.innerHTML = "";
-  state.chips_available.forEach((val) => {
+  chips_available.forEach((val) => {
     const btn = document.createElement("button");
-    btn.className = `chip chip-${state.chip_color.toLowerCase()}`;
+    btn.className = `chip chip-${chip_color.toLowerCase()}`;
     btn.innerText = `★ ${val}`;
     btn.onclick = () => takeChip(val, "center");
     chipBankEl.appendChild(btn);
@@ -183,10 +376,11 @@ function renderGame(state) {
   // 4. Opponents
   opponentsEl.innerHTML = "";
 
-  const myPlayerId = state.me.player_id;
+  const myPlayerId = isObserverView ? null : me.player_id;
 
-  state.players.forEach((p) => {
-    if (p.player_id === myPlayerId) return;
+  players.forEach((p) => {
+    if (p.is_observer) return;
+    if (myPlayerId && p.player_id === myPlayerId) return;
 
     const pDiv = document.createElement("div");
 
@@ -194,11 +388,12 @@ function renderGame(state) {
     const disconnectedClass = p.is_connected === false ? "disconnected" : "";
 
     pDiv.className = `player-card ${p.is_settled ? "settled" : "thinking"} ${disconnectedClass}`;
+    pDiv.setAttribute("data-player-id", p.player_id);
 
     let chipHtml = '<span class="no-chip">No Chip</span>';
     if (p.chip) {
       chipHtml = `
-        <button class="chip chip-${state.chip_color.toLowerCase()}"
+        <button class="chip chip-${chip_color.toLowerCase()}"
                 onclick="takeChip(${p.chip}, '${p.player_id}')">
           ★ ${p.chip}
         </button>
@@ -242,27 +437,78 @@ function renderGame(state) {
       : "";
 
     pDiv.innerHTML = `
-      <div class="p-name">${p.name}</div>
+      <button class="p-name-btn" data-player-id="${p.player_id}" data-player-name="${p.name.replace(/"/g, "&quot;")}">${p.name}</button>
       <div class="p-status">${statusLabel}</div>
       ${kickHtml}
       ${handHtml}
       <div class="p-chip">${chipHtml}</div>
       ${historyHtml}
+      <div class="tomato-splat" aria-hidden="true">💥</div>
     `;
+    const nameBtn = pDiv.querySelector(".p-name-btn");
+    nameBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const targetId = nameBtn.getAttribute("data-player-id");
+      const targetName = nameBtn.getAttribute("data-player-name") || p.name;
+      toggleTomatoMenu(targetId, targetName, nameBtn);
+    });
     opponentsEl.appendChild(pDiv);
   });
+
+  // Observers
+  observerListEl.innerHTML = "";
+  const observerItems = (players || []).filter((p) => p.is_observer);
+  if (observerItems.length === 0) {
+    observerListEl.innerHTML = '<span class="observer-empty">No observers</span>';
+  } else {
+    observerItems.forEach((o) => {
+      const pill = document.createElement("div");
+      const disconnectedClass = o.is_connected === false ? "disconnected" : "";
+      pill.className = `observer-pill ${disconnectedClass}`;
+      const youTag = (isObserverView && o.player_id === me.player_id) ? " (You)" : "";
+      const queueTag = o.queued_to_join ? " (QUEUING)" : "";
+      pill.textContent = `${o.name}${queueTag}${youTag}`;
+      observerListEl.appendChild(pill);
+    });
+  }
+
+  observerStatusEl.textContent = isObserverView ? "You are observing" : "";
+  observerBtn.textContent = isObserverView ? "Join Game" : "Observe";
+
+  // Chat
+  if (chatMessagesEl) {
+    chatMessagesEl.innerHTML = "";
+    (chat_messages || []).forEach((msg) => {
+      const line = document.createElement("div");
+      line.className = "chat-line";
+      const roleTag = msg.is_observer ? " (Observer)" : "";
+
+      const nameEl = document.createElement("span");
+      nameEl.className = "chat-name";
+      nameEl.textContent = `${msg.name}${roleTag}`;
+
+      const textEl = document.createElement("span");
+      textEl.className = "chat-text";
+      textEl.textContent = msg.text;
+
+      line.appendChild(nameEl);
+      line.appendChild(textEl);
+      chatMessagesEl.appendChild(line);
+    });
+    chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+  }
 
   // 5. My State
   // My Cards
   myCardsEl.innerHTML = "";
-  if (state.me.hand && state.me.hand.length > 0) {
-    state.me.hand.forEach((c) => myCardsEl.appendChild(createCardDiv(c)));
+  if (!isObserverView && me.hand && me.hand.length > 0) {
+    me.hand.forEach((c) => myCardsEl.appendChild(createCardDiv(c)));
   }
 
   // My History
   myHistoryEl.innerHTML = "";
-  if (state.me.chip_history && state.me.chip_history.length > 0) {
-    state.me.chip_history.forEach((h) => {
+  if (!isObserverView && me.chip_history && me.chip_history.length > 0) {
+    me.chip_history.forEach((h) => {
       const span = document.createElement("span");
       span.className = `mini-chip chip-${h.color.toLowerCase()}`;
       span.innerText = h.value;
@@ -271,10 +517,14 @@ function renderGame(state) {
   }
 
   // My Chip (current)
-  if (state.me.chip) {
-    myChipSlot.innerHTML = `<div class="chip chip-${state.chip_color.toLowerCase()}">★ ${state.me.chip}</div>`;
+  if (!isObserverView && me.chip) {
+    myChipSlot.innerHTML = `<div class="chip chip-${chip_color.toLowerCase()}">★ ${me.chip}</div>`;
     settleBtn.disabled = false;
-    returnBtn.disabled = state.me.is_settled;
+    returnBtn.disabled = me.is_settled;
+  } else if (isObserverView) {
+    myChipSlot.innerHTML = '<span class="placeholder">Observer</span>';
+    settleBtn.disabled = true;
+    returnBtn.disabled = true;
   } else {
     myChipSlot.innerHTML = '<span class="placeholder">Pick a chip</span>';
     settleBtn.disabled = true;
@@ -282,7 +532,11 @@ function renderGame(state) {
   }
 
   // Disable/enable chip bank picking based on settle state
-  if (state.me.is_settled) {
+  if (isObserverView) {
+    settleBtn.innerText = "I'm Settled";
+    settleBtn.classList.remove("active");
+    chipBankEl.classList.add("disabled");
+  } else if (me.is_settled) {
     settleBtn.innerText = "Cancel Settle";
     settleBtn.classList.add("active");
     chipBankEl.classList.add("disabled");
@@ -291,7 +545,234 @@ function renderGame(state) {
     settleBtn.classList.remove("active");
     chipBankEl.classList.remove("disabled");
   }
+
+  if (playerAreaEl) {
+    playerAreaEl.classList.toggle("playing-settled", !isObserverView && me.is_settled);
+    ensureTomatoSplat(playerAreaEl);
+    playerAreaEl.setAttribute("data-player-id", me.player_id);
+  }
+  applyActiveTomatoTarget(me, playerAreaEl);
+  applyTomatoEffect(state?.tomato_event, me, playerAreaEl);
+  if (pendingTomatoEvent) {
+    applyTomatoEffect(pendingTomatoEvent, me, playerAreaEl);
+    pendingTomatoEvent = null;
+  }
   updateDisconnectedTimers();
+}
+
+function ensureTomatoSplat(container) {
+  if (!container || container.querySelector(".tomato-splat")) return;
+  const splat = document.createElement("div");
+  splat.className = "tomato-splat";
+  splat.setAttribute("aria-hidden", "true");
+  splat.textContent = "💥";
+  container.appendChild(splat);
+}
+
+function applyTomatoEffect(event, me, playerAreaEl) {
+  if (!event || typeof event.at !== "number") {
+    document.querySelectorAll(".tomato-hit").forEach((el) => {
+      el.classList.remove("tomato-hit");
+    });
+    if (tomatoImpactTimeout) clearTimeout(tomatoImpactTimeout);
+    updateTomatoToast(null);
+    return;
+  }
+
+  const now = Date.now();
+  const ageMs = now - event.at * 1000;
+  if (ageMs > TOMATO_LIFETIME_MS) {
+    document.querySelectorAll(".tomato-hit").forEach((el) => {
+      el.classList.remove("tomato-hit");
+    });
+    if (tomatoImpactTimeout) clearTimeout(tomatoImpactTimeout);
+    updateTomatoToast(null);
+    return;
+  }
+
+  if (event.id && event.id === lastTomatoEventId) {
+    return;
+  }
+
+  const targetId = event.to_id;
+  const targetCard = targetId
+    ? document.querySelector(`.player-card[data-player-id="${targetId}"]`)
+    : null;
+  const targetEl = targetCard || (me && me.player_id === targetId ? playerAreaEl : null);
+
+  const sourceId = event.from_id;
+  const sourceCard = sourceId
+    ? document.querySelector(`.player-card[data-player-id="${sourceId}"]`)
+    : null;
+  const sourceEl = sourceCard || (me && me.player_id === sourceId ? playerAreaEl : null);
+
+  if (event.id) {
+    lastTomatoEventId = event.id;
+  }
+  if (targetId) {
+    activeTomatoTargetId = targetId;
+    activeTomatoExpiresAt = event.at * 1000 + TOMATO_LIFETIME_MS;
+    activeTomatoShowAt = Date.now() + TOMATO_FLIGHT_MS;
+  }
+
+  if (sourceEl && targetEl) {
+    animateTomatoFlight(sourceEl, targetEl);
+    scheduleTomatoImpact(targetId, me, playerAreaEl, TOMATO_FLIGHT_MS);
+    updateTomatoToast(`🍅 ${event.from_name} splats ${event.to_name}!`);
+    scheduleTomatoClear();
+  } else if (targetEl) {
+    targetEl.classList.add("tomato-hit");
+    updateTomatoToast(`🍅 ${event.from_name} splats ${event.to_name}!`);
+    scheduleTomatoClear();
+  } else {
+    updateTomatoToast(`🍅 ${event.from_name} splats ${event.to_name}!`);
+    scheduleTomatoClear();
+  }
+}
+
+function applyActiveTomatoTarget(me, playerAreaEl) {
+  const now = Date.now();
+  if (!activeTomatoTargetId || now > activeTomatoExpiresAt) {
+    document.querySelectorAll(".tomato-hit").forEach((el) => {
+      el.classList.remove("tomato-hit");
+    });
+    activeTomatoTargetId = null;
+    activeTomatoExpiresAt = 0;
+    activeTomatoShowAt = 0;
+    if (tomatoImpactTimeout) clearTimeout(tomatoImpactTimeout);
+    return;
+  }
+  if (activeTomatoShowAt && now < activeTomatoShowAt) {
+    scheduleTomatoImpact(activeTomatoTargetId, me, playerAreaEl, activeTomatoShowAt - now);
+    return;
+  }
+
+  const targetCard = document.querySelector(
+    `.player-card[data-player-id="${activeTomatoTargetId}"]`
+  );
+  const targetEl = targetCard || (me && me.player_id === activeTomatoTargetId ? playerAreaEl : null);
+  if (targetEl) {
+    targetEl.classList.add("tomato-hit");
+  }
+}
+
+function scheduleTomatoImpact(targetId, me, playerAreaEl, delayMs) {
+  if (!targetId) return;
+  if (tomatoImpactTimeout) clearTimeout(tomatoImpactTimeout);
+  tomatoImpactTimeout = setTimeout(() => {
+    const targetCard = document.querySelector(
+      `.player-card[data-player-id="${targetId}"]`
+    );
+    const targetEl =
+      targetCard || (me && me.player_id === targetId ? playerAreaEl : null);
+    if (targetEl) {
+      targetEl.classList.add("tomato-hit");
+    }
+  }, Math.max(0, delayMs));
+}
+
+function animateTomatoFlight(sourceEl, targetEl) {
+  const container = $("game-container");
+  if (!container) return;
+
+  const cRect = container.getBoundingClientRect();
+  const sRect = sourceEl.getBoundingClientRect();
+  const tRect = targetEl.getBoundingClientRect();
+
+  const startX = sRect.left + sRect.width / 2 - cRect.left;
+  const startY = sRect.top + sRect.height / 2 - cRect.top;
+  const endX = tRect.left + tRect.width / 2 - cRect.left;
+  const endY = tRect.top + tRect.height / 2 - cRect.top;
+
+  const dx = endX - startX;
+  const dy = endY - startY;
+
+  const tomato = document.createElement("div");
+  tomato.className = "tomato-flight";
+  tomato.textContent = "🍅";
+  tomato.style.left = `${startX}px`;
+  tomato.style.top = `${startY}px`;
+  tomato.style.transform = "translate(-50%, -50%) scale(0.6) rotate(-15deg)";
+  container.appendChild(tomato);
+
+  requestAnimationFrame(() => {
+    tomato.style.transform = `translate(-50%, -50%) translate(${dx}px, ${dy}px) scale(1) rotate(10deg)`;
+  });
+
+  const cleanup = () => {
+    tomato.removeEventListener("transitionend", cleanup);
+    tomato.remove();
+    targetEl.classList.add("tomato-hit");
+  };
+  tomato.addEventListener("transitionend", cleanup);
+  setTimeout(() => {
+    if (!tomato.isConnected) return;
+    tomato.removeEventListener("transitionend", cleanup);
+    tomato.remove();
+    targetEl.classList.add("tomato-hit");
+  }, TOMATO_FLIGHT_MS + 200);
+}
+
+function scheduleTomatoClear() {
+  if (tomatoClearTimeout) clearTimeout(tomatoClearTimeout);
+  tomatoClearTimeout = setTimeout(() => {
+    document.querySelectorAll(".tomato-hit").forEach((el) => {
+      el.classList.remove("tomato-hit");
+    });
+    document.querySelectorAll(".tomato-flight").forEach((el) => {
+      el.remove();
+    });
+    activeTomatoTargetId = null;
+    activeTomatoExpiresAt = 0;
+    activeTomatoShowAt = 0;
+    if (tomatoImpactTimeout) clearTimeout(tomatoImpactTimeout);
+    updateTomatoToast(null);
+  }, TOMATO_LIFETIME_MS);
+}
+
+function updateTomatoToast(text) {
+  const container = $("game-container");
+  if (!container) return;
+  let toast = $("tomato-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "tomato-toast";
+    container.appendChild(toast);
+  }
+
+  if (!text) {
+    toast.classList.remove("show");
+    toast.textContent = "";
+    return;
+  }
+
+  toast.textContent = text;
+  toast.classList.add("show");
+}
+
+function showGameActionToast(text) {
+  const container = $("game-container");
+  if (!container) return;
+  let toast = $("game-action-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "game-action-toast";
+    container.appendChild(toast);
+  }
+
+  if (!text) {
+    toast.classList.remove("show");
+    toast.textContent = "";
+    return;
+  }
+
+  toast.textContent = text;
+  toast.classList.add("show");
+
+  if (gameActionToastTimeout) clearTimeout(gameActionToastTimeout);
+  gameActionToastTimeout = setTimeout(() => {
+    toast.classList.remove("show");
+  }, GAME_ACTION_TOAST_MS);
 }
 
 function createCardDiv(card) {
