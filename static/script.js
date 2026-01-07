@@ -175,6 +175,9 @@ function toggleTomatoMenu(targetPlayerId, targetName, anchorEl) {
   if (!targetPlayerId || !anchorEl) return;
   const existing = document.querySelector(".tomato-menu");
   if (existing) {
+    if (existing._outsideClickHandler) {
+      document.removeEventListener("click", existing._outsideClickHandler);
+    }
     existing.remove();
     openTomatoMenu = null;
   }
@@ -186,25 +189,34 @@ function toggleTomatoMenu(targetPlayerId, targetName, anchorEl) {
       🍅
     </button>
   `;
+  let closeOnOutsideClick = null;
+  const removeMenu = () => {
+    if (closeOnOutsideClick) {
+      document.removeEventListener("click", closeOnOutsideClick);
+      closeOnOutsideClick = null;
+    }
+    if (menu.isConnected) {
+      menu.remove();
+    }
+    openTomatoMenu = null;
+  };
   const btn = menu.querySelector(".tomato-menu-btn");
   btn.addEventListener("click", (event) => {
     event.stopPropagation();
     socket.emit("throw_tomato", { target_player_id: targetPlayerId });
-    menu.remove();
-    openTomatoMenu = null;
+    removeMenu();
   });
 
   anchorEl.appendChild(menu);
   openTomatoMenu = menu;
 
-  const closeOnOutsideClick = (event) => {
+  closeOnOutsideClick = (event) => {
     if (!menu.isConnected) return;
     if (menu.contains(event.target)) return;
     if (anchorEl.contains(event.target)) return;
-    menu.remove();
-    openTomatoMenu = null;
-    document.removeEventListener("click", closeOnOutsideClick);
+    removeMenu();
   };
+  menu._outsideClickHandler = closeOnOutsideClick;
   document.addEventListener("click", closeOnOutsideClick);
 }
 
